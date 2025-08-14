@@ -5,6 +5,9 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .models import Listing, Booking
 from .serializers import ListingSerializer, BookingSerializer
+from django.conf import settings
+from django.http import JsonResponse
+from .models import Payment
 
 ### LISTINGS CRUD ###
 
@@ -132,3 +135,62 @@ def booking_detail(request, pk):
     elif request.method == 'DELETE':
         booking.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+    
+
+def initiate_payment(request):
+    # Example booking data
+    booking_reference = request.POST.get("booking_reference")
+    amount = request.POST.get("amount")
+
+    payment = Payment.objects.create(
+        booking_reference=booking_reference,
+        amount=amount
+    )
+
+    payload = {
+        "amount": amount,
+        "currency": "ETB",
+        "email": "yonas@gmail.com", 
+        "tx_ref": str(payment.payment_id),
+        "callback_url": "http://localhost:8000/listings/verify-payment/",
+        "first_name": "Yonas",
+        "last_name": "Yonas"
+    }
+
+    headers = {
+        "Authorization": f"Bearer {settings.CHAPA_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(f"{settings.CHAPA_BASE_URL}/transaction/initialize", json=payload, headers=headers)
+    data = response.json()
+
+    if response.status_code == 200 and data.get("status") == "success":
+        payment.transaction_id = data["data"]["id"]
+        payment.save()
+        return JsonResponse({"payment_url": data["data"]["checkout_url"]})
+    return JsonResponse({"error": data.get("message", "Failed to initiate payment")}, status=400)
+
+
+def verify_payment(request):
+    tx_ref = request.GET.get("tx_ref")  # or transaction_id
+    payment = Payment.objects.get(payment_id=tx_ref)
+
+    headers = {
+        "Authorization": f"Bearer {settings.CHAPA_SECRET_KEY}"
+    }
+
+    response = requests.get(f"{settings.CHAPA_BASE_URL}/transaction/verify/{payment.transaction_id}", headers=headers)
+    data = response.json()
+
+    if response.status_code == 200 and data.get("status") == "success":
+        payment.status = "Completed"
+    else:
+        payment.status = "Failed"
+    payment.save()
+
+    return JsonResponse({
+        "payment_id": payment.payment_id,
+        "status": payment.status
+    })
+
